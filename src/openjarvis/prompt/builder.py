@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+from datetime import datetime, tzinfo
 from pathlib import Path
-from typing import List, Literal, Optional, Tuple
+from typing import Callable, List, Literal, Optional, Tuple
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from openjarvis.core.config import MemoryFilesConfig, SystemPromptConfig
 from openjarvis.core.paths import get_config_dir
+
+logger = logging.getLogger(__name__)
 
 PromptCacheSegment = Literal["frozen_prefix", "dynamic_suffix"]
 
@@ -34,6 +39,7 @@ class SystemPromptBuilder:
         skill_catalog_xml: Optional[str] = None,
         skill_few_shot: Optional[List[str]] = None,
         skill_few_shot_examples: Optional[List[str]] = None,
+        now: Optional[Callable[[], datetime]] = None,
     ) -> None:
         self._agent_template = agent_template
         _mf = memory_files_config or MemoryFilesConfig()
@@ -48,6 +54,8 @@ class SystemPromptBuilder:
             self._skill_few_shot = list(skill_few_shot_examples)
         else:
             self._skill_few_shot = list(skill_few_shot or [])
+        self._now = now
+        self._tz = self._resolve_timezone(self._sp_config.timezone)
         self._frozen_prefix: Optional[str] = None
         self._frozen_sections: Optional[list[PromptSection]] = None
 
@@ -55,6 +63,9 @@ class SystemPromptBuilder:
         if self._frozen_prefix is None:
             self._frozen_prefix = self._build_frozen_prefix()
         parts = [self._frozen_prefix]
+        date_section = self._current_date_section()
+        if date_section is not None:
+            parts.append(f"\n\n{date_section.content}")
         if self._session_context:
             parts.append(f"\n\n## Session Context\n\n{self._session_context}")
         if self._previous_state:
@@ -64,6 +75,9 @@ class SystemPromptBuilder:
     def sections(self) -> list[PromptSection]:
         """Return prompt sections with lightweight cache/debug metadata."""
         sections = [*self._get_frozen_sections()]
+        date_section = self._current_date_section()
+        if date_section is not None:
+            sections.append(date_section)
         if self._session_context:
             sections.append(
                 PromptSection(
@@ -83,6 +97,65 @@ class SystemPromptBuilder:
                 )
             )
         return sections
+
+    @staticmethod
+    def _resolve_timezone(tz_name: str) -> Optional[tzinfo]:
+        """Return the configured zone, or ``None`` for host-local time.
+
+        Resolved once per builder, not per prompt: a typo would otherwise log
+        on every build(). A bad value degrades to local time with one warning
+        rather than breaking every prompt.
+        """
+        tz_name = (tz_name or "").strip()
+        if not tz_name:
+            return None
+        try:
+            return ZoneInfo(tz_name)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            logger.warning(
+                "Ignoring system_prompt.timezone %r (%s); using local time",
+                tz_name,
+                exc,
+            )
+            return None
+
+    def _resolve_now(self) -> datetime:
+        """Return the current time in the configured zone."""
+        if self._now is not None:
+            return self._now()
+        if self._tz is not None:
+            return datetime.now(self._tz)
+        return datetime.now().astimezone()
+
+    def _current_date_section(self) -> Optional[PromptSection]:
+        """Today's date, as a dynamic-suffix section.
+
+        Without it "today"/"latest" are answered from training data, which
+        produces a confidently wrong date rather than an admission of
+        ignorance. Kept out of the frozen prefix on purpose: the value
+        changes, so baking it in would invalidate the prompt cache on every
+        request.
+        """
+        if not self._sp_config.include_current_date:
+            return None
+        now = self._resolve_now()
+        tz_label = now.tzname() or ""
+        suffix = f" {tz_label}" if tz_label else ""
+        content = (
+            "## Current Date\n\n"
+            f"Today is {now:%A, %d %B %Y} (ISO: {now:%Y-%m-%d}). "
+            f"The current local time is {now:%H:%M}{suffix}.\n\n"
+            "This is authoritative. Use it instead of inferring the date from "
+            "your training data, and never state a different date, day of "
+            "week, or year from memory. Anything more recent than your "
+            "training data must be looked up with a tool, not recalled."
+        )
+        return PromptSection(
+            name="current_date",
+            content=content,
+            source="system_prompt.include_current_date",
+            cache_segment="dynamic_suffix",
+        )
 
     def _get_frozen_sections(self) -> list[PromptSection]:
         if self._frozen_sections is None:

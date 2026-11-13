@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -178,6 +179,7 @@ def test_sections_expose_prompt_metadata(memory_dir: Path):
         "soul",
         "memory",
         "user",
+        "current_date",
         "session_context",
         "previous_state",
     ]
@@ -221,3 +223,148 @@ def test_missing_files_handled(tmp_path: Path):
     )
     prompt = builder.build()
     assert "Jarvis" in prompt
+
+
+# -- current date injection ------------------------------------------------
+#
+# A model is never told what day it is, so "today" questions get answered from
+# training data as a confidently wrong date. These pin the fix, and pin that it
+# stays out of the cached frozen prefix.
+
+
+def _fixed_clock(dt: datetime):
+    return lambda: dt
+
+
+def test_current_date_injected_into_prompt(tmp_path: Path):
+    from openjarvis.prompt.builder import SystemPromptBuilder
+
+    builder = SystemPromptBuilder(
+        agent_template="You are Jarvis.",
+        memory_files_config=MemoryFilesConfig(
+            soul_path="", memory_path="", user_path=""
+        ),
+        system_prompt_config=SystemPromptConfig(),
+        now=_fixed_clock(datetime(2026, 11, 13, 14, 30)),
+    )
+
+    prompt = builder.build()
+
+    assert "## Current Date" in prompt
+    assert "2026-11-13" in prompt
+    assert "Friday, 13 November 2026" in prompt
+    assert "14:30" in prompt
+
+
+def test_current_date_is_dynamic_suffix_not_frozen(tmp_path: Path):
+    """The date must never land in the cached frozen prefix."""
+    from openjarvis.prompt.builder import SystemPromptBuilder
+
+    builder = SystemPromptBuilder(
+        agent_template="You are Jarvis.",
+        memory_files_config=MemoryFilesConfig(
+            soul_path="", memory_path="", user_path=""
+        ),
+        system_prompt_config=SystemPromptConfig(),
+        now=_fixed_clock(datetime(2026, 11, 13, 14, 30)),
+    )
+
+    date_sections = [s for s in builder.sections() if s.name == "current_date"]
+    assert len(date_sections) == 1
+    assert date_sections[0].cache_segment == "dynamic_suffix"
+
+    frozen = [s for s in builder.sections() if s.cache_segment == "frozen_prefix"]
+    assert all("2026-11-13" not in s.content for s in frozen)
+
+
+def test_frozen_prefix_stable_across_date_change(tmp_path: Path):
+    """Rolling the clock must not invalidate the frozen prefix."""
+    from openjarvis.prompt.builder import SystemPromptBuilder
+
+    def _builder(dt: datetime):
+        return SystemPromptBuilder(
+            agent_template="You are Jarvis.",
+            memory_files_config=MemoryFilesConfig(
+                soul_path="", memory_path="", user_path=""
+            ),
+            system_prompt_config=SystemPromptConfig(),
+            now=_fixed_clock(dt),
+        )
+
+    day_one = _builder(datetime(2026, 11, 13, 9, 0))
+    day_two = _builder(datetime(2027, 3, 1, 23, 45))
+
+    def frozen(b):
+        return [s.content for s in b.sections() if s.cache_segment == "frozen_prefix"]
+
+    assert frozen(day_one) == frozen(day_two)
+    assert day_one.build() != day_two.build()
+
+
+def test_current_date_can_be_disabled(tmp_path: Path):
+    from openjarvis.prompt.builder import SystemPromptBuilder
+
+    builder = SystemPromptBuilder(
+        agent_template="You are Jarvis.",
+        memory_files_config=MemoryFilesConfig(
+            soul_path="", memory_path="", user_path=""
+        ),
+        system_prompt_config=SystemPromptConfig(include_current_date=False),
+        now=_fixed_clock(datetime(2026, 11, 13, 14, 30)),
+    )
+
+    assert "## Current Date" not in builder.build()
+    assert all(s.name != "current_date" for s in builder.sections())
+
+
+def test_configured_timezone_used_for_date(tmp_path: Path):
+    from openjarvis.prompt.builder import SystemPromptBuilder
+
+    builder = SystemPromptBuilder(
+        agent_template="You are Jarvis.",
+        memory_files_config=MemoryFilesConfig(
+            soul_path="", memory_path="", user_path=""
+        ),
+        system_prompt_config=SystemPromptConfig(timezone="America/New_York"),
+    )
+
+    now = builder._resolve_now()
+    assert now.tzinfo is not None
+    assert now.tzname() in {"EST", "EDT"}
+
+
+def test_invalid_timezone_falls_back_to_local(tmp_path: Path):
+    """A typo'd timezone must not break every prompt the agent builds."""
+    from openjarvis.prompt.builder import SystemPromptBuilder
+
+    builder = SystemPromptBuilder(
+        agent_template="You are Jarvis.",
+        memory_files_config=MemoryFilesConfig(
+            soul_path="", memory_path="", user_path=""
+        ),
+        system_prompt_config=SystemPromptConfig(timezone="Not/A_Zone"),
+    )
+
+    prompt = builder.build()
+    assert "## Current Date" in prompt
+
+
+def test_invalid_timezone_warns_once_not_per_prompt(caplog):
+    """The zone is resolved per builder, not per build()."""
+    import logging
+
+    from openjarvis.prompt.builder import SystemPromptBuilder
+
+    with caplog.at_level(logging.WARNING, logger="openjarvis.prompt.builder"):
+        builder = SystemPromptBuilder(
+            agent_template="You are Jarvis.",
+            memory_files_config=MemoryFilesConfig(
+                soul_path="", memory_path="", user_path=""
+            ),
+            system_prompt_config=SystemPromptConfig(timezone="Not/A_Zone"),
+        )
+        for _ in range(5):
+            builder.build()
+
+    matching = [r for r in caplog.records if "system_prompt.timezone" in r.message]
+    assert len(matching) == 1

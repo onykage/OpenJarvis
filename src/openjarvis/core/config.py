@@ -1683,6 +1683,14 @@ class SystemPromptConfig:
     user_max_chars: int = 1500
     skill_desc_max_chars: int = 60
     truncation_strategy: str = "head_tail"
+    # Inject today's date into every system prompt. Without it a model has no
+    # way to know the date and answers "today" questions from its training
+    # data -- stating a confidently wrong date rather than refusing. Lives in
+    # the dynamic suffix, so it never invalidates the cached frozen prefix.
+    include_current_date: bool = True
+    # IANA timezone for that date (e.g. "America/New_York"). Empty means the
+    # host's local timezone.
+    timezone: str = ""
 
 
 @dataclass(slots=True)
@@ -2292,6 +2300,15 @@ max_turns = 10
 # system_prompt = ""           # Inline system prompt
 # system_prompt_path = ""      # Path to system prompt file
 context_from_memory = true
+
+# System-prompt assembly. include_current_date tells the model what day it is;
+# without it "today"/"latest" questions get answered from training data as a
+# confidently wrong date. It is appended as a dynamic suffix, so it does not
+# invalidate the cached frozen prefix.
+# [system_prompt]
+# include_current_date = true  # inject today's date into every prompt
+# timezone = ""                # IANA name, e.g. "America/New_York" ("" = local)
+# prefix = ""                  # persona text prepended ahead of the template
 
 [tools.storage]
 default_backend = "sqlite"
