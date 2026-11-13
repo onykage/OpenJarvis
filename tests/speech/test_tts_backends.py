@@ -147,11 +147,14 @@ def test_kokoro_missing_chinese_deps_gives_actionable_error(monkeypatch):
     from openjarvis.speech.kokoro_tts import KokoroTTSBackend
 
     class FakeKPipeline:
-        def __init__(self, lang_code, model):
+        def __init__(self, lang_code, model, repo_id=None):
             # Mimic what happens inside Kokoro when misaki.zh can't import.
             raise ImportError("No module named 'ordered_set'")
 
     class FakeKModel:
+        def __init__(self, **kwargs):
+            pass
+
         def to(self, _device):
             return self
 
@@ -189,7 +192,7 @@ def test_kokoro_pipeline_cached_per_language(monkeypatch):
             return self
 
     class FakeKPipeline:
-        def __init__(self, lang_code, model):
+        def __init__(self, lang_code, model, repo_id=None):
             init_calls.append(lang_code)
             self.model = model
 
@@ -217,6 +220,9 @@ def test_kokoro_pipeline_cache_is_thread_safe(monkeypatch):
     init_calls = []
 
     class FakeKModel:
+        def __init__(self, **kwargs):
+            pass
+
         def to(self, _device):
             return self
 
@@ -224,7 +230,7 @@ def test_kokoro_pipeline_cache_is_thread_safe(monkeypatch):
             return self
 
     class FakeKPipeline:
-        def __init__(self, lang_code, model):
+        def __init__(self, lang_code, model, repo_id=None):
             init_calls.append(lang_code)
             time.sleep(0.02)
 
@@ -260,6 +266,9 @@ def test_kokoro_pipeline_cache_evicts_lru_and_cleans_up(monkeypatch):
     instances = {}
 
     class FakeKModel:
+        def __init__(self, **kwargs):
+            pass
+
         def to(self, _device):
             return self
 
@@ -267,7 +276,7 @@ def test_kokoro_pipeline_cache_evicts_lru_and_cleans_up(monkeypatch):
             return self
 
     class FakeKPipeline:
-        def __init__(self, lang_code, model):
+        def __init__(self, lang_code, model, repo_id=None):
             self.closed = False
             instances[lang_code] = self
 
@@ -320,6 +329,9 @@ def test_kokoro_synthesize_routes_voice_to_correct_language(monkeypatch):
     call_args = []
 
     class FakeKModel:
+        def __init__(self, **kwargs):
+            pass
+
         def to(self, device):
             self.device = device
             return self
@@ -328,7 +340,7 @@ def test_kokoro_synthesize_routes_voice_to_correct_language(monkeypatch):
             return self
 
     class FakeKPipeline:
-        def __init__(self, lang_code, model):
+        def __init__(self, lang_code, model, repo_id=None):
             init_args.append(lang_code)
             self.model = model
 
@@ -365,7 +377,7 @@ def test_kokoro_reuses_model_and_honors_path_and_device(monkeypatch):
     import sys
     import types
 
-    from openjarvis.speech.kokoro_tts import KokoroTTSBackend
+    from openjarvis.speech.kokoro_tts import KOKORO_REPO_ID, KokoroTTSBackend
 
     model_inits = []
     model_devices = []
@@ -383,7 +395,7 @@ def test_kokoro_reuses_model_and_honors_path_and_device(monkeypatch):
             return self
 
     class FakeKPipeline:
-        def __init__(self, lang_code, model):
+        def __init__(self, lang_code, model, repo_id=None):
             pipeline_models.append((lang_code, model))
 
     monkeypatch.setitem(
@@ -396,12 +408,18 @@ def test_kokoro_reuses_model_and_honors_path_and_device(monkeypatch):
     backend._ensure_pipeline("a")
     backend._ensure_pipeline("z")
 
-    assert model_inits == [{"model": "/models/kokoro.pth"}]
+    assert len(model_inits) == 1
+    assert model_inits[0]["model"] == "/models/kokoro.pth"
+    # repo_id is pinned explicitly; omitting it makes kokoro print a WARNING.
+    assert model_inits[0]["repo_id"] == KOKORO_REPO_ID
     assert model_devices == ["cpu"]
     assert pipeline_models[0][1] is pipeline_models[1][1]
 
 
 class _FakeKModel:
+    def __init__(self, **kwargs):
+        pass
+
     def to(self, _device):
         return self
 
@@ -466,7 +484,7 @@ def test_kokoro_tolerates_unloadable_spacy_for_non_english_voices(monkeypatch):
     pipelines = []
 
     class FakeKPipeline:
-        def __init__(self, lang_code, model):
+        def __init__(self, lang_code, model, repo_id=None):
             pipelines.append(lang_code)
 
     _serve_kokoro_importing_spacy(monkeypatch, FakeKPipeline)
@@ -629,7 +647,7 @@ def test_kokoro_health_and_pipeline_share_one_model(monkeypatch):
     errors = []
 
     class SlowModel(_FakeKModel):
-        def __init__(self):
+        def __init__(self, **kwargs):
             models.append(self)
             time.sleep(0.02)
 
@@ -703,7 +721,7 @@ def test_kokoro_health_does_not_build_english_pipeline(monkeypatch):
     pipelines = []
 
     class FakeKPipeline:
-        def __init__(self, lang_code, model):
+        def __init__(self, lang_code, model, repo_id=None):
             pipelines.append(lang_code)
 
     monkeypatch.setitem(
@@ -856,3 +874,89 @@ def test_elevenlabs_missing_key_raises(monkeypatch):
     monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="ELEVENLABS_API_KEY"):
         ElevenLabsTTSBackend().synthesize("Hello")
+
+
+# ---------------------------------------------------------------------------
+# Kokoro model-load noise suppression
+#
+# Loading Kokoro printed third-party chatter straight into an interactive
+# `jarvis chat --voice` session, after the assistant's reply, which reads like a
+# failure when nothing failed. These pin that torch's load warnings are muted,
+# that the filter is narrow enough to let our own warnings through, and that no
+# global state is left modified.
+# ---------------------------------------------------------------------------
+
+
+def test_quiet_model_load_restores_warning_filters():
+    import warnings as _w
+
+    from openjarvis.speech.kokoro_tts import _quiet_model_load
+
+    before = list(_w.filters)
+    with _quiet_model_load():
+        pass
+    assert list(_w.filters) == before
+
+
+def test_quiet_model_load_still_lets_non_torch_warnings_through():
+    """Filtering is per-module, so our own warnings are not collateral."""
+    import warnings as _w
+
+    from openjarvis.speech.kokoro_tts import _quiet_model_load
+
+    with _quiet_model_load():
+        with _w.catch_warnings(record=True) as seen:
+            _w.simplefilter("always")
+            _w.warn("kokoro voice missing", UserWarning)
+
+    assert [str(w.message) for w in seen] == ["kokoro voice missing"]
+
+
+def test_quiet_model_load_restores_filters_on_exception():
+    import warnings as _w
+
+    from openjarvis.speech.kokoro_tts import _quiet_model_load
+
+    before = list(_w.filters)
+    with pytest.raises(RuntimeError):
+        with _quiet_model_load():
+            raise RuntimeError("load blew up")
+    assert list(_w.filters) == before
+
+
+def test_kokoro_passes_explicit_repo_id_to_model():
+    """Omitting repo_id makes kokoro print a WARNING to stdout."""
+    from unittest.mock import MagicMock
+
+    from openjarvis.speech import kokoro_tts
+    from openjarvis.speech.kokoro_tts import KOKORO_REPO_ID, KokoroTTSBackend
+
+    kmodel = MagicMock()
+    kmodel.return_value.to.return_value.eval.return_value = object()
+    fake_kokoro = MagicMock(KModel=kmodel)
+
+    backend = KokoroTTSBackend(device="cpu")
+    with patch.object(kokoro_tts, "_import_kokoro", return_value=fake_kokoro):
+        backend._ensure_model()
+
+    assert kmodel.call_args.kwargs["repo_id"] == KOKORO_REPO_ID
+
+
+def test_kokoro_passes_explicit_repo_id_to_pipeline():
+    from unittest.mock import MagicMock
+
+    from openjarvis.speech import kokoro_tts
+    from openjarvis.speech.kokoro_tts import KOKORO_REPO_ID, KokoroTTSBackend
+
+    kpipeline = MagicMock()
+    fake_kokoro = MagicMock(KPipeline=kpipeline)
+    fake_kokoro._openjarvis_spacy_error = None
+
+    backend = KokoroTTSBackend(device="cpu")
+    with (
+        patch.object(kokoro_tts, "_import_kokoro", return_value=fake_kokoro),
+        patch.object(KokoroTTSBackend, "_ensure_model", return_value=object()),
+    ):
+        backend._ensure_pipeline("b")
+
+    assert kpipeline.call_args.kwargs["repo_id"] == KOKORO_REPO_ID

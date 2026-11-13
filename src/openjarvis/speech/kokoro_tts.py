@@ -19,7 +19,10 @@ import logging
 import sys
 import threading
 import types
+import warnings
 from collections import OrderedDict
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any, Dict, List
 
 from openjarvis.core.registry import TTSRegistry
@@ -42,9 +45,48 @@ _VOICE_PREFIX_TO_LANG: Dict[str, str] = {
     "e": "e",  # Spanish
 }
 
+# Kokoro prints "WARNING: Defaulting repo_id to ... Pass repo_id=... to
+# suppress this warning" to stdout whenever repo_id is omitted, once per
+# KModel and once per KPipeline. Passing it explicitly is what the warning
+# asks for, and it also pins the weights we load instead of inheriting
+# whatever a future kokoro release defaults to.
+KOKORO_REPO_ID = "hexgrad/Kokoro-82M"
+
 _DEFAULT_LANG_CODE = "a"
 _DEFAULT_VOICE_ID = "af_heart"
 _IMPORT_LOCK = threading.RLock()
+
+
+@contextmanager
+def _quiet_model_load() -> Iterator[None]:
+    """Silence torch's load-time deprecation chatter while Kokoro builds.
+
+    Constructing Kokoro trips three warnings from inside torch -- a
+    ``weight_norm`` deprecation, a ``torch.jit.script`` deprecation, and an
+    LSTM ``dropout`` notice provoked by Kokoro's own architecture. None is
+    actionable by a user of OpenJarvis, and in an interactive
+    ``jarvis chat --voice`` session they print *after* the assistant's reply,
+    which reads like a failure when nothing failed.
+
+    Filtered by module rather than by category, so a warning raised by
+    kokoro, misaki or OpenJarvis itself during the same call still surfaces;
+    only torch's internals are muted. ``catch_warnings`` restores the global
+    filter state on exit, including when construction raises.
+
+    Two things this deliberately does not silence:
+
+    * Kokoro's ``Defaulting repo_id`` notice, which is a bare ``print`` and so
+      unreachable by any filter -- passing :data:`KOKORO_REPO_ID` is what
+      removes it.
+    * huggingface_hub's "sending unauthenticated requests" line, which is a
+      log record rather than a warning. Quieting it means changing that
+      library's global verbosity, which would race against a concurrent load
+      and can leave it clamped; setting ``HF_TOKEN`` is the supported fix.
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=FutureWarning, module=r"torch\..*")
+        warnings.filterwarnings("ignore", category=UserWarning, module=r"torch\..*")
+        yield
 
 
 def _import_kokoro() -> Any:
@@ -167,7 +209,12 @@ class KokoroTTSBackend(TTSBackend):
             try:
                 # KModel is language-blind and is by far the heaviest part of
                 # Kokoro. Reuse one model across every language pipeline.
-                pipeline = KPipeline(lang_code=lang_code, model=self._ensure_model())
+                with _quiet_model_load():
+                    pipeline = KPipeline(
+                        lang_code=lang_code,
+                        repo_id=KOKORO_REPO_ID,
+                        model=self._ensure_model(),
+                    )
             except ImportError as exc:
                 # Kokoro loads language-specific G2P resources at init time and
                 # several languages need extra dependencies that aren't pulled in
@@ -227,7 +274,10 @@ class KokoroTTSBackend(TTSBackend):
 
         model_kwargs = {"model": self._model_path} if self._model_path else {}
         try:
-            self._model = KModel(**model_kwargs).to(device).eval()
+            with _quiet_model_load():
+                self._model = (
+                    KModel(repo_id=KOKORO_REPO_ID, **model_kwargs).to(device).eval()
+                )
         except RuntimeError as exc:
             raise RuntimeError(
                 f"Failed to initialize Kokoro on device {device!r}: {exc}"
