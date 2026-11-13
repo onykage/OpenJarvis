@@ -163,27 +163,20 @@ def chat(
         console.print("[red]No model available.[/red]")
         sys.exit(1)
 
-    from openjarvis.cli._runtime_panel import (
-        ChatRuntimeOptions,
-        interactive_pick_runtime_options,
-        tty_wants_runtime_panel,
-    )
+    from openjarvis.cli._runtime_panel import resolve_runtime_options
 
     if engine_name != "ollama" and (num_ctx is not None or num_gpu is not None):
         raise click.UsageError(
             "--num-ctx and --num-gpu are supported only with --engine ollama"
         )
-    if engine_name == "ollama" and tty_wants_runtime_panel(skip_runtime_panel):
-        runtime_opts = interactive_pick_runtime_options(
-            console,
-            engine_name=engine_name,
-            cli_num_ctx=num_ctx,
-            cli_num_gpu=num_gpu,
-        )
-    elif engine_name == "ollama" and (num_ctx is not None or num_gpu is not None):
-        runtime_opts = ChatRuntimeOptions(num_ctx=num_ctx, num_gpu=num_gpu)
-    else:
-        runtime_opts = ChatRuntimeOptions()
+    runtime_opts = resolve_runtime_options(
+        console,
+        engine_name=engine_name,
+        config=config,
+        cli_num_ctx=num_ctx,
+        cli_num_gpu=num_gpu,
+        skip_panel=skip_runtime_panel,
+    )
     engine_kwargs = runtime_opts.to_engine_kwargs(engine_name=engine_name)
 
     # Interactive chat is a first-class tool execution path. Apply the same

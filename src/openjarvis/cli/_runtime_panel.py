@@ -52,6 +52,47 @@ class ChatRuntimeOptions:
         return ", ".join(parts)
 
 
+def resolve_runtime_options(
+    console: Any,
+    *,
+    engine_name: str,
+    config: Any,
+    cli_num_ctx: Optional[int] = None,
+    cli_num_gpu: Optional[int] = None,
+    skip_panel: bool = False,
+) -> "ChatRuntimeOptions":
+    """Decide this session's runtime options, prompting only if it must.
+
+    Precedence is ``--num-ctx``/``--num-gpu``, then ``[engine.ollama]`` in
+    config, then the interactive panel. Configuring either value is itself the
+    answer to the panel's question, so it stops prompting -- otherwise the
+    choice has to be re-entered on every interactive run.
+
+    ``None`` means "not configured" for both options, because 0 is meaningful
+    for each: ``num_gpu = 0`` is CPU-only, and ``num_ctx = 0`` is the panel's
+    own spelling of "engine default".
+    """
+    if engine_name != "ollama":
+        return ChatRuntimeOptions()
+
+    ollama_cfg = getattr(getattr(config, "engine", None), "ollama", None)
+    num_ctx = (
+        cli_num_ctx if cli_num_ctx is not None else getattr(ollama_cfg, "num_ctx", None)
+    )
+    num_gpu = (
+        cli_num_gpu if cli_num_gpu is not None else getattr(ollama_cfg, "num_gpu", None)
+    )
+
+    if num_ctx is None and num_gpu is None and tty_wants_runtime_panel(skip_panel):
+        return interactive_pick_runtime_options(
+            console,
+            engine_name=engine_name,
+            cli_num_ctx=cli_num_ctx,
+            cli_num_gpu=cli_num_gpu,
+        )
+    return ChatRuntimeOptions(num_ctx=num_ctx, num_gpu=num_gpu)
+
+
 def tty_wants_runtime_panel(cli_skip: bool = False) -> bool:
     """Show runtime panel on TTY unless skipped."""
     import sys
@@ -162,6 +203,7 @@ __all__ = [
     "MAX_NUM_GPU_LAYERS",
     "ChatRuntimeOptions",
     "interactive_pick_runtime_options",
+    "resolve_runtime_options",
     "runtime_cli_options",
     "tty_wants_runtime_panel",
 ]

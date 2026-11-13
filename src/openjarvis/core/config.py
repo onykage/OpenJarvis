@@ -369,6 +369,12 @@ class OllamaEngineConfig:
     """Per-engine config for Ollama."""
 
     host: str = ""
+    # Inference options that `jarvis chat` otherwise asks for on every
+    # interactive run. ``None`` means "not configured" -- the engine default is
+    # used, and the runtime panel still prompts. Setting either one records the
+    # choice and stops the prompt; `--num-ctx` / `--num-gpu` still override.
+    num_ctx: Optional[int] = None  # context window in tokens
+    num_gpu: Optional[int] = None  # layers on GPU; -1 = all, 0 = CPU only
 
 
 @dataclass(slots=True)
@@ -2235,6 +2241,11 @@ default = "{engine}"
 
 [engine.ollama]
 host = "http://localhost:11434"
+# num_ctx and num_gpu are what `jarvis chat` asks for after the model pick.
+# Set either one to record the answer and stop being asked; --num-ctx /
+# --num-gpu still override for a single run.
+# num_ctx = 8192              # context window in tokens
+# num_gpu = -1                # layers on GPU: -1 = all, 0 = CPU only
 
 [engine.vllm]
 host = "http://localhost:8000"
