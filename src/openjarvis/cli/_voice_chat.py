@@ -174,8 +174,19 @@ def record_voice(
 
 
 def speak(text: str, console: Any, session: VoiceSession | None = None) -> None:
-    """Synthesize and play text, reusing a healthy backend for the session."""
+    """Synthesize and play text, reusing a healthy backend for the session.
+
+    *text* is the reply as written, i.e. Markdown, so it is reduced to prose
+    first -- backends otherwise read the markup aloud. See
+    :mod:`openjarvis.speech.speakable`.
+    """
+    from openjarvis.speech.speakable import to_speakable_text
     from openjarvis.speech.voice_io import play_wav
+
+    text = to_speakable_text(text)
+    if not text:
+        # Nothing but markup, e.g. a lone code block. Some backends error on "".
+        return
 
     active_session = session or VoiceSession()
 
